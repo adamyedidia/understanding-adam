@@ -23,22 +23,28 @@
 
 <d-front-matter>
   <script type="text/json">{
-  "title": "The Paths Perspective on Value Learning",
-  "description": "A closer look at how Temporal Difference Learning merges paths of experience for greater statistical efficiency",
+  "title": "Understanding Adam",
+  "description": "A closer look at the dynamics of Adam, pre- and post-convergence",
   "authors": [
 
     {
-      "author": "Sam Greydanus",
-      "authorURL": "https://greydanus.github.io/about.html",
-      "affiliation": "Google Brain",
-      "affiliationURL": "https://g.co/brain"
+      "author": "Adam Yedidia",
+      "authorURL": "adamyedidia.wordpress.com",
+      "affiliation": "MIT",
+      "affiliationURL": "mit.edu"
     },
 
     {
-      "author": "Chris Olah",
-      "authorURL": "https://colah.github.io/",
-      "affiliation": "OpenAI",
-      "affiliationURL": "https://openai.com"
+      "author": "Sadhika Malladi",
+    }
+    {
+      "author": "Chris Hesse",
+    }
+    {
+      "author": "John Schulman",
+    }
+    {
+      "author": "Jacob Hilton",
     }
   ],
   "katex": {
@@ -60,71 +66,10 @@
 </d-front-matter>
 
 <d-title>
-  <h1>The Paths Perspective on Value Learning</h1>
+  <h1>Understanding Adam</h1>
   <p>
-    A closer look at how Temporal Difference learning merges paths of experience for greater statistical efficiency.
+   A closer look at the dynamics of Adam, pre- and post-convergence
   </p>
-  <div id="compare-caption">
-
-    <button id="compare_play_button" type="button" style="margin: 0 0 1rem;">Play</button>
-    <div class="figcaption">
-      These value estimators behave differently where paths of experience intersect.
-    </div>
-  </div>
-  <figure id="compare-figure" style="grid-column: text-start/page-end; overflow-x: visible">
-    <div id="MC">
-        <svg width=380 height=380 viewbox="0 0 380 380"></svg>
-        <figcaption>
-            <h4>Monte Carlo</h4>
-            <d-math>V(s_t) ~\hookleftarrow~ R_t</d-math>
-        </figcaption>
-    </div>
-    <div id="TD">
-        <svg width=380 height=380 viewbox="0 0 380 380"></svg>
-        <figcaption>
-            <h4>Temporal Difference</h4>
-            <d-math>V(s_t) ~\hookleftarrow~ r_{t} ~+~ \gamma V(s_{t+1})</d-math>
-        </figcaption>
-    </div>
-    <div id="Q">
-        <svg width=380 height=380 viewbox="0 0 380 380"></svg>
-        <figcaption>
-            <h4>Q-Learning</h4>
-            <d-math>Q(s_t, a_t) ~\hookleftarrow~ r_{t} ~+~ \gamma V(s_{t+1})</d-math>
-            <d-math>V(s_{t+1}) ~=~ \mathop{\textrm{max}} \limits_{a} ~ Q(s_{t+1},a_{t+1})</d-math>
-        </figcaption>
-    </div>
-
-    <script>
-      (function() {
-        let compare_play_button = document.querySelector("#compare_play_button");
-
-        let run = compare_vis(
-          document.getElementById("compare-figure"),
-          {algs: ["MC", "TD", "Q"], trail: true},
-          () => {
-            compare_play_button.textContent = "Play";
-            compare_play_button.disabled = false;
-
-          }
-        );
-
-        compare_play_button.addEventListener("click", () => {
-
-          compare_play_button.textContent = "Playing..."
-          compare_play_button.disabled = true;
-          d3.selectAll("#connector").attr("visibility", "hidden"); // a hack to fix a hack
-          run();
-        });
-
-        compare_play_button.click();
-
-      })();
-
-
-    </script>
-
-  </figure>
 
 </d-title>
 
@@ -133,932 +78,240 @@
 
   <h2>Introduction</h2>
   <p>
-    In the last few years, reinforcement learning (RL) has made remarkable progress, including <a href="https://deepmind.com/research/alphago/">beating world-champion Go players</a>, <a href="https://blog.openai.com/learning-dexterity/">controlling robotic hands</a>, and even <a href="https://deepmind.com/blog/learning-to-generate-images/">painting pictures</a>.
+# Adam is Unstable on Quadratic Loss Functions
+
+This memo is a brief analysis of Adam, and how it can behave unstably. This memo is mainly meant as an addendum to the memo *Mitigating Loss Spikes*; it's self-contained, but it's quite a bit denser and as such you might have some difficulty understanding it if you're not already well-familiarized with Adam or if you didn't come here from *Mitigating Loss Spikes*. For a gentler explanation of Adam, see the section on how Adam works in *Mitigating Loss Spikes*, or see this blog post on different optimization algorithms. If you want, you can skip straight ahead to the [TL;DR section](#tldr), which will tell you how to detect if this issue is bottlenecking you and what to do about it if it is.
+
+## Motivation
+
+The 1D quadratic loss function is arguably the simplest possible convex loss function. Moreover, because all smooth real-world loss functions are locally quadratic, and because Adam acts on each of its dimensions independently, we can expect at least some of the our conclusions about Adam on the 1D quadratic to carry over to real-world functions, at least after we've partly converged to a local optimum (since that optimum is likely to be locally quadratic). An analysis on the same model (though with a different focus) can be found in this paper by Zhang et al. Additionally, it's previously been demonstrated that Adam doesn't converge on all convex functions, as initially claimed; the counterexample is presented in this paper by Reddi et al. I'll go further and show that Adam doesn't converge on all quadratic functions.
+
+## Model
+
+Our loss function will be $y_t = cx_t^2$, for some constant $c$. At each iteration, we'll observe a noisy gradient:
+
+$$g_t = \frac{dy}{dx}(t) + \xi = 2cx_t + \xi$$
+
+Here $\xi$ is an additive noise term which we'll take to be normally distributed with mean 0 and variance $\sigma_{\xi}^2$. Often when I analyze the model in its simplest possible case I'll assume $\sigma_\xi = 0$.
+
+## Adam Update Rule
+
+Adam's update rule is as follows:
+
+$$m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t$$
+$$v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2$$
+$$\hat{m}_t = m_t/(1 - \beta_1^t)$$
+$$\hat{v}_t = v_t/(1 - \beta_2^t)$$
+$$x_{t+1} = x_t - \frac{\eta}{\sqrt{\hat{v}_t} + \epsilon}\hat{m}_t$$
+
+Adam's hyperparameters here are $\beta_1$ and $\beta_2$, which control the length of the exponential averages of the first and second moments respectively, the learning rate $\eta$, and $\epsilon$.
+
+The third and fourth equations above constitute Kingma and Ba's "bias correction" for at the start of optimization; they make a negligible difference in the limit as $t \rightarrow \infty$ (more precisely, when $\beta_1^t \ll 1$ and $\beta_2^t \ll 1$), and as such, I will sometimes neglect them and assume $\hat{m}_t = m_t$ and $\hat{v}_t = v_t$, since the focus of this memo is on Adam's steady-state behavior.
+
+## Fixed points of Adam 
+
+When running Adam on the 1D quadratic function with a given set of hyperparameters and no noise, there are many different possible different repeating sequences of observations $x$. The simplest ones of these I'll call "fixed points": basic oscillating sequences where $x_{t+1} = -x_t$ for all $t$ (including $t<0$; for simplicity, these sequences extend infinitely in both directions). These fixed points aren't always stable, and reaching them isn't the typical case when Adam is run on a noiseless quadratic, but they are easy to calculate and I believe that Adam's nontrivial fixed points often reveal something about how Adam will behave for that set of hyperparameters. 
+
+For every set of hyperparameters with $\epsilon > 0$, there is a trivial fixed point: $x_t = 0$ for all $t$. This is the set of fixed points caused by starting the search at the optimum. This is the only situation in which Adam reaches the function's true optimum and stays there even in the noiseless case, and even in the limit as $t \rightarrow \infty$. Moreover, this set of fixed points only exists in the first place because of the hyperparameter $\epsilon$.
+
+Let us suppose that we are at the fixed point when $x_t = x^*$ for all even $t$ and $x_t = -x^*$ for all odd $t$. We can derive the nontrivial fixed point by unwrapping the infinite sums $v_T$ and $m_T$ (because this is in steady-state, we can assume $\hat{v}_T = v_T$ and $\hat{m}_T = m_T$):
+
+$$m_T = (1-\beta_1)\sum_{t = -\infty}^T \beta_1^{T-t} g_t= (1-\beta_1)\sum_{t = -\infty}^T \beta_1^{T-t} 2cx_t$$
+$$m_T = (1-\beta_1)\sum_{t = -\infty}^T (-\beta_1)^{T-t} 2cx^* = 2cx^* (1-\beta_1) \sum_{t = -\infty}^T (-\beta_1)^{T-t}$$
+$$m_T = 2cx^*\frac{1-\beta_1}{1+\beta_1}$$
+
+$$v_T = (1-\beta_2)\sum_{t = -\infty}^T \beta_2^{T-t} g_t^2 = (1-\beta_2)\sum_{t = -\infty}^T \beta_2^{T-t} 4c^2x_t^2$$
+$$v_t = (1-\beta_2)\sum_{t = -\infty}^T \beta_2^{T-t} 4c^2(x^*)^2 = 4c^2(x^*)^2$$
+
+Finally, since we know that $x_{T+1} = -x_T = x^*$, we can use the update rule itself to write:
+
+$$x_{T+1} = x_T - \eta\frac{m_T}{\sqrt{v_T} + \epsilon}$$
+
+$$2x^* = \eta \frac{1-\beta_1}{1+\beta_1}\frac{2cx^*}{\epsilon + 2cx^*}$$
+
+<!--When $\epsilon$ is very small ($\epsilon \ll c\eta(1-\beta_1)/(1+\beta_1)$), --> 
+This equation admits a beautiful solution: 
+
+$$x^* = \frac{\eta(1-\beta_1)}{2(1+\beta_1)} - \frac{\epsilon}{2c}$$
+
+Note that when $\epsilon$ is small ($\epsilon \ll c\eta(1-\beta_1)/(1+\beta_1)$), the fixed point is completely independent of $c$ (and therefore the loss function), depending only on Adam's hyperparameters. If $\epsilon$ gets larger, the nontrivial fixed point will start becoming smaller and smaller until it reaches 0 when $\epsilon = c\eta (1-\beta_1)/(1-\beta_2)$.
+
+If Adam's fixed points only exist in the noiseless setting, and generally aren't reached by Adam even then, why bother studying them? The answer is that they give us a sense for how close Adam can possibly get to the optimum, given the chosen set of hyperparameters. This matters because it would be embarrassing for us to choose a set of hyperparameters that result in us generally staying further from the optimum than would be implied by the level of noise.
+
+To be more specific, when we run Adam on the noisy 1D quadratic, our ability to get as close as possible to the optimum is constrained by two factors simultaneously:
+
+- Signal-to-noise limitations: we won't be able to get within less than $\sigma_{\xi}/(2c)$ of the minimum.
+- Adam limitations: we won't (stably) be able to get within less than $x^*$ of the minimum.
+
+This document is essentially about the second category of limitations, but such limitations only become relevant in the first place when $\sigma_{\xi}/(2c) < x^*$---that is, in the low-noise regime. I should emphasize that in many practical models, noise is sufficiently high that this effect doesn't appear to come into play.
+
+## Adam's Instability
+
+The title of this memo promised not just nonconvergence, but instability. Indeed, if the problem was just that Adam doesn't converge on quadratic loss functions, that would be one thing, but in fact it's worse than that: when the noise level is sufficiently low relative to the signal along one of the parameters (as formulated in the previous section), Adam will generally become unstable, repeatedly becoming much closer to the optimum than its fixed point, and then diverging. This section is about how and why that happens.
+
+Let's start by unrolling $v_T$. (Once again, we'll be studying the steady-state behavior, and assuming $v_T = \hat{v}_T$.) We can write:
+
+$$v_T = (1-\beta_2)\sum_{t = 0}^T \beta_2^{T-t} g_t^2$$
+$$v_T = (1-\beta_2)\beta_2^T\sum_{t = 0}^T \beta_2^{-t} g_t^2$$
+
+Let's consider the case where Adam is converging with a convergence rate faster than $\sqrt{\beta_2^t}$. (With Adam's default values, this is the typical case---and in any case this premise will soon justify itself.) Given this assumption, we can infer that the sequence $g_t^2$ is shrinking faster than the sequence $\beta_2^{-t}$ is growing, and that the overall sum of $\beta_2^{-t} g_t^2$ is dominated by its very earliest terms.
+
+If this is the case, then the value of the sum isn't growing with $T$ for a reasonably large $T$, but rather is constant. Let's let $\sum_{t = 0}^T \beta_2^{-t} g_t^2 \approx \sum_{t = 0}^{\infty} \beta_2^{-t} g_t^2 = S$. Now we have $v_T = S(1-\beta_2)\beta_2^T$. Recall Adam's update rule:
+
+$$x_{T+1} = x_T - \eta\frac{m_T}{\sqrt{v_T} + \epsilon}$$
+
+Let's define the "effective learning rate" $\eta'(T)$ to be:
+
+$$\eta'(T) = \frac{\eta}{\sqrt{v_T} + \epsilon}$$
+
+We can rewrite Adam's update rule as follows:
+
+$$x_{T+1} = x_T - \eta'(T)\sum_{t=0}^T\beta_1^{T-t}g_t$$
+
+Let's also assume that $\epsilon \ll \sqrt{v_T}$ for now, and ignore it. (Don't worry, we'll revisit $\epsilon$ later.) 
+
+$$\eta'(T) \approx \frac{\eta}{\sqrt{S(1-\beta_2)\beta_2^T}}$$
+
+This no longer looks like Adam---this is SGD with momentum! The only difference is that instead of having a fixed learning rate, our learning rate varies with $T$. In fact, our learning rate *increases exponentially* with $T$: every time step, our learning rate is multiplied by a factor of $1/\sqrt{\beta_2}$. So effectively, when we run Adam and it converges faster than $\sqrt{\beta_2^t}$, we're more or less just running SGD with momentum---but with an exponentially increasing learning rate. Small wonder we experience instability! No matter how low we set $\eta$, eventually $\eta'(T)$ will increase to the point that SGD with momentum *will* diverge.
+
+Let's revisit the assumptions I made now. First, will Adam actually converge faster than $\sqrt{\beta_2^T}$? Assuming it does, we're effectively running SGD with momentum with a varying learning rate, but thankfully that is surprisingly easy to analyze. With a fairly large $\beta_1$ like $\beta_1 = 0.9$, our convergence rate will be (mostly) perfectly constant while we are converging, with a convergence rate of $\sqrt{\beta_1^T}$. (For more details on this, I highly encourage reading Goh's [*Why Momentum Really Works*](https://distill.pub/2017/momentum/); in this section I rely on the beginning of the section titled "The Dynamics of Momentum," the accompanying demo, and footnote 4 (which is where the convergence rate of $\sqrt{\beta_1}$ is given)).
+
+In any case, the take-away is that yes, the assumption justifies itself; given default Adam values of $\beta_1 = 0.9$ and $\beta_2 = 0.999$ (or, indeed, any $\beta_1 < \beta_2$), if we assume that Adam converges faster than $\sqrt{\beta_2^T}$, we can conclude that Adam will converge faster than $\sqrt{\beta_2^T}$.
+
+Up to a point, that is. Once it's the case that $c\eta'(T) > 1 + \beta_1$ (and it has to happen sooner or later), our SGD with momentum will diverge. (Once again, thanks to [Goh's paper](https://distill.pub/2017/momentum/) for the relevant convergence analysis.) During this stage, the divergence rate is unfortunately much more complicated to analyze, as it depends on the varying $\eta'(T)$. By combining the formula at the bottom of Goh's footnote 4 with our formula for $\eta'(T)$, it is possible to work out the divergence rate as a function of time, and the approximate amount of time the divergence stage must last; this memo will exclude that analysis, though, because it is both very complicated and not terribly insightful. Suffice it to say that after having reached the point where $c\eta'(T) > 2 + 2\beta_1$, Adam won't diverge forever; rather, it will diverge until the point when the sum $\sum_{t = 0}^T \beta_2^{T-t} g_t^2$ stops being dominated by its earliest terms, and starts being dominated by its latest ones. At that point, Adam will start to converge again at a rate of $\sqrt{\beta_1^T}$, and the cycle will begin anew.
+
+There's one more thing that I promised to address that I've ignored until now: $\epsilon$. Nonzero $\epsilon$ guarantees a maximum possible effective learning rate; no matter how small $v_T$ becomes, the effective learning rate can never be greater than $\eta (1-\beta_1)/\epsilon$. This means that that the unstable divergent behavior will only actually be observed if $c\eta (1-\beta_1)/\epsilon > 2 + 2\beta_1$. Note that for the default values of Adam ($\eta = 3\times 10^{-4}$, $\beta_1=0.9$, $\epsilon = 10^{-8}$), we will still observe periodic divergence for all but the least steep quadratics (divergence will occur when $c > 0.00127$). However, we do see that given nonzero $\epsilon$, we can fix Adam's instability by increasing $\beta_1$, decreasing $\eta$, or increasing $\epsilon$. In practice, if you think you are experiencing instability from this phenomenon (though not otherwise), I recommend increasing $\epsilon$, perhaps to somewhere between $10^{-3}$ and $10^{-5}$.
+
+## Examples
+
+As a worked example, let's look at the specific case of Adam run on the 1D noisy quadratic ($y = cx^2$, $g_t = 2cx_t + \xi$) with quadratic scaling $c = 1$ and noise standard deviation $\sigma_{\xi} = 10^{-8}$. We'll run Adam for $10^5$ time-steps with its default values of $\eta = 3\times 10^{-4}$, $\beta_1=0.9$, $\beta_2=0.999$, $\epsilon = 10^{-8}$, beginning with an initial value of $x_0 = 1$.
+ 
+The first thing we should do is look at its nontrivial fixed point. In this case, we have $\epsilon \ll c\eta(1-\beta_1)/(1+\beta_1)$, so we can make use of the simpler approximate formula for the value of the fixed point: $x^* = \frac{\eta(1-\beta_1)}{2(1+\beta_1)}$. This gives us a fixed point of ß. We notice that this is much higher than $\sigma_\xi/(2c)$, and thereby infer that the limitations implied by our fixed point are much stronger than those implied by the signal-to-noise ratio. We can expect instability.
+
+Below is a plot of $x_t$ for the first 25,000 time-steps. After a slightly slow start, Adam gets into the convergent regime and quickly converges at a rate of $\sqrt{\beta_1^t}$ to the limit implied by the signal-to-noise ratio, seemingly in contradiction to the prediction we made about the dynamics around the fixed point dominating. The only sign that anything is amiss is that the average value of $x$ seems to be creeping upward at a slow but exponential rate of $1/\sqrt{\beta_2^t}$. From our previous analysis, we know that this is because the effective learning rate is increasing exponentially, and although it hasn't yet caused divergence, it's making the noise have a more and more pronounced effect.
+
+![x25k](figs/first_25k_x.png)
+
+*Figure 1. On the left, we have $x$ as a function of time, and on the right we have  $\log_{10}(|x|)$, for the first 25,000 time-steps.*
+
+Now let's see how the learning rates are doing. 
+
+![LR25k](figs/first_25k_lrs.png)
+
+*Figure 2. On the left, we have the effective learning rate $\eta'(t)$ as compared to the critical learning rate $(1+\beta_1)/c$, and on the right we have the same thing on a log scale, for the first 25,000 time-steps.*
+
+Only by looking at this plot do we see just how close the impending disaster is. The effective learning rate $\eta'(t)$ is given by $\eta(1-\beta_1)/(\sqrt{v_t} + \epsilon)$. As we can see, after the beginning it increases exponentially at a rate of $1/\sqrt{\beta_2^t}$, as we predicted it would. When it exceeds the critical learning rate of $(1+\beta_1)/c$, divergence will occur. In trying to get closer to the minimum than Adam's fixed point allows, we were hubristic; that hubris must ultimately spell our downfall.
+
+Let's see what happens over the course of the next 1,000 time-steps.
+
+![x25k](figs/next_1k_x.png)
+*Figure 3. On the left, we have $x$ as a function of time, and on the right we have  $\log_{10}(|x|)$, for time-steps between 25,000 and 26,000.*
+
+![x25k](figs/next_1k_lrs.png)
+*Figure 4. On the left, we have the effective learning rate $\eta'(t)$ as compared to the critical learning rate $(1+\beta_1)/c$, and on the right we have the same thing on a log scale, for time-steps between 25,000 and 26,000.*
+
+Now we see the predicted periodic spiking behavior. Our spikes are composed of two phases: a converging phase during which we converge to the minimum at a rate of $\sqrt{\beta_1^t}$ while our effective learning rate increases at a rate of $1/\sqrt{\beta_2^t}$, until our effective learning rate surpasses the critical learning rate, at which point the diverging phase begins. During the diverging phase, we diverge at a hard-to-express, non-constant rate given by footnote 4 of Goh, until $x$ reaches an absolute value commensurate with previous peaks and begins converging again. With our choices of hyperparameters and noise, the peaks appear to have a period of about 190 time-steps, and continue at this rate for all $10^5$ time-steps that we run Adam for. It's possible that as this happens we make (extremely) slow progress towards Adam's nontrivial fixed point, but I don't see any evidence for it from looking at the plot, nor am I convinced that that is necessarily the outcome given the presence of noise.
+
+How is the spikes' period affected by the hyperparameters? To work out the precise dependence is very difficult, because it requires understanding the complicated dynamics that exist at the boundaries between the convergent and divergent phases, as well as the complicated non-constant divergence rate; however, a few things seem to be true to me:
+
+- Changing the learning rate $\eta$ makes no difference to the spikes' period, provided you don't set it so low relative to $\epsilon$ and $\beta_1$ that they disappear entirely.
+- Increasing $\beta_1$ makes the spikes less frequent, because it makes convergence slower (convergence happens as $\sqrt{\beta_1^t})$.
+- Increasing $\beta_2$ makes spikes less frequent, because it causes our effective learning rate to increase more slowly (our effective learning rate increases as $1/\sqrt{\beta_2^t}$).
+- Changing $\epsilon$ makes no difference to the spikes' period, provided you don't set it so high relative to $\eta$ and $\beta_1$ that they disappear entirely.
+
+<!-- What's the best solution to this problem? The simplest and easiest solution is to increase $\epsilon$. As we saw in our study of Adam's fixed points, when $\epsilon \ge c\eta (1-\beta_1)/(1-\beta_2)$, the model's fixed point reaches 0, and convergence becomes possible. This can be thought of as switching to SGD with momentum when the last observed gradients are sufficiently small, and that approach will work if you set your effectively learning rate low enough (equivalently, setting $\epsilon$ high enough). -->
+
+## Adam's instability in "real" models
+
+<!-- Does this issue come up in practice? Probably more often than never. Karl Cobbe, who works on my team, generously showed me a small toy model he used to look into dynamics around supervised learning; the model uses Adam for image classification and has 217,866 parameters.
+
+Running his model yields the following loss curves:
+
+![LR25k](figs/octokarl_both.png)
+*Left: Karl's model with $\beta_2 = 0.99$ and other parameters set to default Adam parameters. Right: Karl's model with $\beta_2 = 0.999$ and other parameters set to default Adam parameters.*
+
+These loss curves bear a strong resemblance to the following plots of Adam run on the 1D quadratic loss function: -->
+
+Does Adam's instability matter in practice? In fact, yes. It's easier than you might think to find this phenomenon occurring in real neural nets. For instance, running the example MNIST training code found [here](https://www.tensorflow.org/tutorials) for more epochs yields the following loss curve:
+
+![adam_standard_loss](figs/mnist_standard_loss.png)
+
+We don't see a regular pattern of spikes, but that isn't enough to disqualify the spikes/noise we do see as being caused in part by Adam's instability. Recall that, assuming small $\epsilon$, we know that Adam's fixed point is $x^* = \pm \frac{\eta(1-\beta_1)}{2(1+\beta_1)}$. Let's try plotting the updates of a single parameter as a function of time, long after convergence (to isolate the effect we're looking for, this is from full-batch training, although the other plots are for standard batch-size-32 training):
+
+![mnist_spikes](figs/mnist_spikes_5.png)
+
+We see spikes, but not regular ones. Are these spikes a result of Adam's instability?
+
+It depends on what you mean by "a result of." The spikes aren't regular, so there must be more at play than what's going on in the 1D quadratic model... but on the other hand, we can see that our weights are trying to converge to within less than $x^*$ of the true optimum (much of the time, we have $|u_t| < x^*$), and we know that that can't ever possibly happen when we use Adam. So while there is an object-level reason why we're seeing these spikes (in this case, it's a dropout layer), we also know that no matter what we did the universe would have found some excuse to keep us from converging all the way to the optimum.
+
+If we delete the dropout layer, we revert to seeing the regular spiking pattern we've come to know and love:
+
+![adam_spiky_loss](figs/mnist_spiky_loss.png)
+
+## How to fix the problem
+
+What's the best way to fix this issue? It depends on exactly what exactly you're finding to be problematic. If you don't care about converging to within less than $x^*$ of the loss function's optimum, but you just want to avoid the instability, then decreasing $\beta_2$ will have the effect of making your instability spikes smaller (and more frequent), and when you make it equal to $\beta_1$ they'll disappear altogether (since then our old assumption that Adam will converge faster than $\sqrt{\beta_2^t}$ will become false). This will have the added benefit of suppressing spikes from large observed gradients (see [this memo](https://go/memos/doc/spike_mitigation) for more details on that).
+
+If you do want to converge arbitrarily close to the optimum, I suggest two possible easy fixes: the first is to use a learning rate schedule, and the second is to increase $\epsilon$.
+
+Using a learning rate schedule means decaying the learning rate $\eta$ over the course of training. Given that Adam's instability comes from the fact that when you converge quickly, the effective learning rate increases by a factor of $1/\sqrt{\beta_2}$ each update, it seems natural to multiply $\eta$ by $\sqrt{\beta_2}$ each update. This will allow perfect fast convergence on the 1D quadratic model, but the absence of noise in the 1D quadratic model means this approach won't generalize directly to real-world models; most likely the correct approach will be to multiply $\eta$ by $\sqrt{\beta_2}$ every time you observe some number of batches, assuming your batches are already critically-sized (meaning they're at the size where your signal-to-noise ratio is 1); perhaps that number should be 10 or 100, although I haven't tested it extensively on many different problems. Unfortunately, it will probably depend to a certain degree on your problem and how large of a distance your model expects to travel in parameter-space from initialization to optimum; this, in turn, probably depends on how overparametrized your model is (with more overparametrized models having a shorter distance from initialization to optimum and therefore being able to tolerate a more aggressive learning rate decay). In any case, I'll note that it's probably better to err on the side of decaying the learning rate more slowly, because the consequence of decaying it too slowly is that you'll converge to the optimum more slowly than you could have, but the consequence of decaying it too quickly is that you'll converge to a suboptimal point.
+
+Increasing $\epsilon$ is the other possible solution. I don't favor it as much, because it has a handful of downsides. The first is that you have to tune it to your problem (admittedly, you'll also probably have to tune it to your learning rate schedule). Increasing $\epsilon$ is like switching from Adam to SGD with momentum once your average gradients drop below a certain level; while this can be justified, different functions will have different levels of steepness and want different switching points. Vanilla SGD and SGD with momentum, after all, can be quite unstable and are very sensitive to the choice of learning rate (see the corresponding plots in [this memo](https://go/memos/doc/spike_mitigation)).
+
+The second downside is that epsilon doesn't respect the different scales of your individual parameters. It might turn out that there's no single good value of $\epsilon$; maybe varying different parameters changes your loss function by different amounts, and you'd need a different $\epsilon$ for each parameter. This, after all, is the problem Adam was supposed to solve in the first place. By increasing $\epsilon$, you're partially unsolving it.
+
+The final downside is that increasing $\epsilon$ by enough to get true convergence on all parameters will probably harm your performance. By increasing $\epsilon$, you're decreasing your effective learning rate; to mitigate this, you could try increasing $\eta$ in tandem with increasing $\epsilon$. I think that's the right thing to do, but it does mean there's another parameter for you to tune. 
+
+Some slow fixes might be to try switching to a different search algorithm altogether; AdaGrad doesn't suffer from this issue (since it's effectively choosing $\beta_2$ to be 1, it kind of already has a built-in learning rate schedule of $\sqrt{\beta_2^t}$). And if KFAC suffers from this issue, it's too complicated for me to realize (and I doubt it does; in general, second-order methods are stable on quadratics, even noisy ones).
+
+Here's a couple plots showing loss curves from applying the learning-rate schedule and higher-$\epsilon$ solutions to the MNIST example from the previous section. The learning-rate schedule displays much better performance in this example, but I don't strongly endorse this as representative; I didn't tune either very carefully (I used $\epsilon = 10^{-2}$ and a decay rate of $\sqrt{\beta_2}$ every 25 batches). Both solutions cause the periodic spikes to disappear.
+
+![adam_decaying_lr](figs/mnist_decaying_lr.png)
+
+*Figure 7. The MNIST tutorial, this time with a decaying learning rate to make Adam stable.*
+
+![adam_large_eps](figs/mnist_large_eps.png)
+
+*Figure 8. The MNIST tutorial, this time with a large $\epsilon$ to make Adam stable.*
+
+## Acknowledgements
+
+Thanks a lot to Chris Hesse, Jacob Hilton, and John Schulman, for tons and tons of help and ideas. Thanks also to Paul Christiano, Karl Cobbe, Gabriel Goh, Nick Ryder, and Peter Zhokov.
+
+## TL;DR<a name="tldr"></a>
+
+Adam is unstable. Is this a real problem for the model you're currently using? Here's how you find out:
+
+- If your loss curves have periodic spikes after convergence, it's probably this issue---especially if their period varies as you vary $\beta_1$ and $\beta_2$ (for example, if making $\beta_2$ smaller makes the spikes smaller and more frequent).
+
+- Your loss spikes are coming from divergence over many time-steps, rather than a single big observed gradient, that makes it likelier to be this issue.
+
+- If you want to know if you're bottlenecked by this issue, try plotting update size against $\eta(1-\beta_1)/(1-\beta_2)$. If many of your updates are smaller than $\eta(1-\beta_1)/(1-\beta_2)$, and you chose $\epsilon$ to be small, then this issue is very likely bottlenecking you.
+
+<!-- Is Adam's instability causing you problems? The biggest tells (in order from most obvious to least obvious) are:
+
+- Periodic spikes; the slam dunk is if their period varies when you vary $\beta_1$ and $\beta_2$ (increasing either should cause the spikes to become less frequent, decreasing either should cause them to become more frequent, unless you set $\beta_1$ to 0 in which case complicated stuff happens).
+- Your spikes are coming from divergent behavior over many time-steps, rather than a single large observed gradient.
+- You don't have much noise in your model (a very large batch size, or not using batches at all?). -->
+
+What can you do about it? Here are some possible quick fixes that shouldn't impact your performance too much:
+
+
+- Try $\beta_1 = \beta_2 = 0.9$, or $\beta_1 = \beta_2 = 0.99$.
+- Try using an exponentially decaying learning rate; if you're at the critical batch size, try decaying the learning rate by a factor of $\sqrt{\beta_2}$ every 10 or 100 batches. 
+- Increase $\epsilon$ (try $\epsilon$ in the $10^{-2}$ to $10^{-4}$ range; if performance suffers, try increasing your learning rate a bit)
+- Try adding Gaussian noise to your gradients.
+
+Here are some more quick fixes that will negatively impact your performance, in case the previous ones didn't work.
+
+- Try turning up $\beta_1$ a lot (say $\beta_1 = \beta_2 = 0.999$)
+- Try turning down the learning rate $\eta$ a lot.
+
+Here are some slow fixes that will hopefully do very well:
+
+- Try setting $v_t$ to the be the max of two $v_t$'s controlled by two different $\beta_2$ parameters (one equal to $0.999$, the other equal to $0.9$)
+- Try using AdaGrad instead of Adam.
   </p>
-
-  <p>
-    One of the key sub-problems of RL is value estimation – learning the long-term consequences of being in a state.
-
-    This can be tricky because future returns are generally noisy, affected by many things other than the present state. The further we look into the future, the more this becomes true.
-
-    But while difficult, estimating value is also essential to many approaches to RL.<d-footnote>For many approaches (policy-value iteration), estimating value essentially is the whole problem, while in other approaches (actor-critic models), value estimation is essential for reducing noise.</d-footnote>
-  </p>
-
-  <p>
-    The natural way to estimate the value of a state is as the average return you observe from that state. We call this Monte Carlo value estimation.
-  </p>
-
-<figure id="cliffworld-mc" class="base-grid">
-    <figcaption style="grid-column: kicker">
-            <b>Cliff World</b>
-            <d-cite key="Sutton2017ReinforcementIntroduction"></d-cite> is a classic RL example, where the agent learns to
-            walk along a <span style="background: #FFD5D5">cliff</span> to reach a <span
-                style="background: #D5D5FF">goal</span>.
-    </figcaption>
-    <div class="l-text">
-        <div class="subfigure">
-            <img src="figures/cliffworld-path1.svg" />
-            <div class="figcaption">
-                Sometimes the agent reaches its goal.
-            </div>
-        </div>
-
-        <div class="subfigure">
-            <img src="figures/cliffworld-path2.svg" />
-            <div class="figcaption">
-                Other times it falls off the cliff.
-            </div>
-        </div>
-
-        <div class="subfigure">
-            <img src="figures/cliffworld-mc.svg" />
-            <div class="figcaption">
-                Monte Carlo averages over trajectories where they intersect.
-            </div>
-        </div>
-    </div>
-</figure>
-
-  <p>
-    If a state is visited by only one episode, Monte Carlo says its value is the return of that episode. If multiple episodes visit a state, Monte Carlo estimates its value as the average over them.
-  </p>
-
-  <p>
-    Let's write Monte Carlo a bit more formally.
-    In RL, we often describe algorithms with update rules, which tell us how estimates change with one more episode.
-    We'll use an "updates toward" ($\hookleftarrow$) operator to keep equations simple.<d-footnote>
-
-    In tabular settings such as the Cliff World example, this "update towards" operator computes a running average. More specifically, the $n^{th}$ Monte Carlo update is $ V(s_t) = V(s_{t}) + \frac{1}{n} \bigr[ R_{n} - V(s_t) \bigl] $ and we could just as easily use the "+=" notation. But when using parameteric function approximators such as neural networks, our "update towards" operator may represent a gradient step, which cannot be written in "+=" notation. In order to keep our notation clean and general, we chose to use the $\hookleftarrow$ operator throughout.</d-footnote>
-  </p>
-
-  <div class="eq-grid" style="grid-gap: 8px;">
-      <div style="grid-row: 1; grid-column: 1;"><d-math>V(s_t)~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\hookleftarrow~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>R_t</d-math></div>
-
-      <figcaption style="grid-row: 2; grid-column: 1; max-width:140px;"> State value </figcaption>
-      <figcaption style="grid-row: 2; grid-column: 5; max-width:200px;"> Return </figcaption>
-  </div>
-
-  <p>
-    The term on the right is called the return and we use it to measure the amount of long-term reward an agent earns. The return is just a weighted sum of future rewards $r_{t} + \gamma r_{t+1} + \gamma^2 r_{t+2} + ...$ where $\gamma$ is a discount factor which controls how much short term rewards are worth relative to long-term rewards. Estimating value by updating towards return makes a lot of sense. After all, the <i>definition</i> of value is expected return. It might be surprising that we can do better.
-  </p>
-
-  <h2>Beating Monte Carlo</h2>
-
-    <p>
-      But we can do better! The trick is to use a method called <i>Temporal Difference (TD) learning</i>, which bootstraps off of nearby states to make value updates.
-    </p>
-
-
-    <div class="eq-grid" style="grid-gap: 8px; margin-top: 0; margin-bottom: 0;">
-
-      <div style="grid-row: 1; grid-column: 1;"><d-math>V(s_t)~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\hookleftarrow~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>r_{t} </d-math></div>
-      <div style="grid-row: 1; grid-column: 7;"><d-math>+</d-math></div>
-      <div style="grid-row: 1; grid-column: 9;"><d-math>\gamma V(s_{t+1})</d-math></div>
-
-      <figcaption style="grid-row: 2; grid-column: 1; max-width:140px;"> State value </figcaption>
-      <figcaption style="grid-row: 2; grid-column: 5; max-width:140px;">Reward</figcaption>
-      <figcaption style="grid-row: 2; grid-column: 9; max-width:140px;">Next state value</figcaption>
-
-    </div>
-
-    <p>
-      Intersections between two trajectories are handled differently under this update. Unlike Monte Carlo, TD updates merge intersections so that the return flows backwards to all preceding states.
-    <p>
-
-<!--   <figure id="cliffworld-td" class="l-body">
-        <div class="subfigure">
-            <img src="figures/cliffworld-path1.svg"/>
-            <div class="figcaption">
-                Sometimes the agent reaches its goal.
-            </div>
-        </div>
-
-        <div class="subfigure">
-            <img src="figures/cliffworld-path2.svg"/>
-            <div class="figcaption">
-                Other times it falls off the cliff.
-            </div>
-        </div>
-
-        <div class="subfigure">
-            <img src="figures/cliffworld-td.svg"/>
-            <div class="figcaption">
-                TD learning merges paths where they intersect.
-            </div>
-        </div>
-  </figure> -->
-
-  <figure id="cliffworld-mc" class="base-grid">
-    <div class="l-text">
-        <div class="subfigure">
-            <img src="figures/cliffworld-path1.svg" />
-            <div class="figcaption">
-                Sometimes the agent reaches its goal.
-            </div>
-        </div>
-
-        <div class="subfigure">
-            <img src="figures/cliffworld-path2.svg" />
-            <div class="figcaption">
-                Other times it falls off the cliff.
-            </div>
-        </div>
-
-        <div class="subfigure">
-            <img src="figures/cliffworld-td.svg" />
-            <div class="figcaption">
-                TD learning merges paths where they intersect.
-            </div>
-        </div>
-    </div>
-</figure>
-
-    <p>
-      What does it mean to "merge trajectories" in a more formal sense? Why might it be a good idea? One thing to notice is that $V(s_{t+1})$ can be written as the expectation over all of its TD updates:
-    </p>
-
-    <div class="eq-grid" style="grid-gap: 8px;">
-
-      <div style="grid-row: 1; grid-column: 1;"><d-math>V(s_{t+1})~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\simeq~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>\mathop{\mathbb{E}} \bigr[ r'_{t+1} ~+~ \gamma V(s'_{t+2}) \bigl] </d-math></div>
-
-      <div style="grid-row: 3; grid-column: 3;"><d-math>\simeq~~</d-math></div>
-      <div style="grid-row: 3; grid-column: 5;"><d-math>\mathop{\mathbb{E}} \bigr[ r'_{t+1} \bigl] ~~+~~ \gamma \mathop{\mathbb{E}} \bigr[ V(s'_{t+2}) \bigl] </d-math></div>
-
-    </div>
-
-    <p>
-      Now we can use this equation to expand the TD update rule recursively:
-    </p>
-
-  <div class="eq-grid" style="grid-gap: 8px;">
-
-    <div style="grid-row: 1; grid-column: 1;"><d-math>V(s_t)~</d-math></div>
-    <div style="grid-row: 1; grid-column: 3;"><d-math>\hookleftarrow~</d-math></div>
-    <div style="grid-row: 1; grid-column: 5;"><d-math>r_{t} </d-math></div>
-    <div style="grid-row: 1; grid-column: 7;"><d-math>+</d-math></div>
-    <div style="grid-row: 1; grid-column: 9;"><d-math>\gamma V(s_{t+1})</d-math></div>
-
-    <div class="expansion-marker" style="grid-row: 2; grid-column: 9 / 14; "></div>
-
-    <div style="grid-row: 3; grid-column: 1;"><d-math></d-math></div>
-    <div style="grid-row: 3; grid-column: 3;"><d-math>\hookleftarrow~</d-math></div>
-    <div style="grid-row: 3; grid-column: 5;"><d-math>r_{t} </d-math></div>
-    <div style="grid-row: 3; grid-column: 7;"><d-math>+</d-math></div>
-    <div style="grid-row: 3; grid-column: 9;"><d-math>\gamma \mathop{\mathbb{E}} \bigr[ r'_{t+1} \bigl]</d-math></div>
-    <div style="grid-row: 3; grid-column: 11;"><d-math>+</d-math></div>
-    <div style="grid-row: 3; grid-column: 13;"><d-math>\gamma^2 \mathop{\mathbb{E}} \bigr[ V(s''_{t+2}) \bigl]</d-math></div>
-
-    <div class="expansion-marker" style="grid-row: 4; grid-column: 13 / 18; "></div>
-
-    <div style="grid-row: 5; grid-column: 1;"><d-math></d-math></div>
-    <div style="grid-row: 5; grid-column: 3;"><d-math>\hookleftarrow~</d-math></div>
-    <div style="grid-row: 5; grid-column: 5;"><d-math>r_{t} </d-math></div>
-    <div style="grid-row: 5; grid-column: 7;"><d-math>+</d-math></div>
-    <div style="grid-row: 5; grid-column: 9;"><d-math>\gamma \mathop{\mathbb{E}} ~ \bigr[ r'_{t+1} \bigl]</d-math></div>
-    <div style="grid-row: 5; grid-column: 11;"><d-math>+</d-math></div>
-    <div style="grid-row: 5; grid-column: 13;"><d-math>\gamma^2 \mathop{\mathbb{EE}}  ~ \bigr[ r''_{t+2} \bigl]</d-math></div>
-    <div style="grid-row: 5; grid-column: 15;"><d-math>+~</d-math></div>
-    <div style="grid-row: 5; grid-column: 17;"><d-math>...~~</d-math></div>
-
-</div>
-
-    <p>
-      This gives us a strange-looking sum of nested expectation values. At first glance, it's not clear how to compare them with the more simple-looking Monte Carlo update. More importantly, it's not clear that we <i>should</i> compare the two; the updates are so different that it feels a bit like comparing apples to oranges. Indeed, it's easy to think of Monte Carlo and TD learning as two entirely different approaches.
-    </p>
-
-    <p>
-      But they are not so different after all. Let's rewrite the Monte Carlo update in terms of reward and place it beside the expanded TD update.
-    </p>
-
-  <div class="eq-grid" style="grid-gap: 8px;">
-
-    <figcaption style="grid-row: 1; grid-column: 1/3; max-width:140px;"><b>MC update</b></figcaption>
-    <div style="grid-row: 2; grid-column: 1;"><d-math>V(s_t)~</d-math></div>
-    <div style="grid-row: 2; grid-column: 3;"><d-math>~\hookleftarrow~~</d-math></div>
-    <div style="grid-row: 2; grid-column: 5;"><d-math>r_{t}</d-math></div>
-    <div style="grid-row: 2; grid-column: 7;"><d-math>+~</d-math></div>
-    <div style="grid-row: 2; grid-column: 9;"><d-math>\gamma ~ r_{t+1}</d-math></div>
-    <div style="grid-row: 2; grid-column: 11;"><d-math>+~</d-math></div>
-    <div style="grid-row: 2; grid-column: 13;"><d-math>\gamma^2 ~ r_{t+2}</d-math></div>
-    <div style="grid-row: 2; grid-column: 15;"><d-math>+~</d-math></div>
-    <div style="grid-row: 2; grid-column: 17;"><d-math>...</d-math></div>
-
-
-    <figcaption style="grid-row: 3; grid-column: 5/7; max-width:90px; margin: 0px; padding: 0px;">Reward from present path.</figcaption>
-
-    <figcaption style="grid-row: 3; grid-column: 9/11; max-width:125px; margin: 0px; padding: 0px;">Reward from present path.</figcaption>
-
-    <figcaption style="grid-row: 3; grid-column: 13/14; max-width:125px; margin: 0px; padding: 0px;">Reward from present path...</figcaption>
-
-    <figcaption style="grid-row: 4; grid-column: 1/3; max-width:140px; margin-top: 22px;"><b>TD update</b></figcaption>
-    <div style="grid-row: 5; grid-column: 1;"><d-math>V(s_t)~</d-math></div>
-    <div style="grid-row: 5; grid-column: 3;"><d-math>~\hookleftarrow~~</d-math></div>
-    <div style="grid-row: 5; grid-column: 5;"><d-math>r_{t}</d-math></div>
-    <div style="grid-row: 5; grid-column: 7;"><d-math>+~</d-math></div>
-    <div style="grid-row: 5; grid-column: 9;"><d-math>\gamma \mathop{\mathbb{E}} ~ \bigr[ r'_{t+1} \bigl]</d-math></div>
-    <div style="grid-row: 5; grid-column: 11;"><d-math>+~</d-math></div>
-    <div style="grid-row: 5; grid-column: 13;"><d-math>\gamma^2 \mathop{\mathbb{EE}} ~ \bigr[ r''_{t+2} \bigl]</d-math></div>
-    <div style="grid-row: 5; grid-column: 15;"><d-math>+~</d-math></div>
-    <div style="grid-row: 5; grid-column: 17;"><d-math>...</d-math></div>
-
-    <figcaption style="grid-row: 6; grid-column: 5/7; max-width:90px; margin: 0px; padding: 0px;">Reward from present path.</figcaption>
-
-    <figcaption style="grid-row: 6; grid-column: 9/11; max-width:125px; margin: 0px; padding: 0px;">Expectation over paths intersecting present path.</figcaption>
-
-    <figcaption style="grid-row: 6; grid-column: 13/14; max-width:125px; margin: 0px; padding: 0px;">Expectation over paths intersecting <i>paths intersecting</i> present path...</figcaption>
-  </div>
-
-
-    <p>
-      A pleasant correspondence has emerged. The difference between Monte Carlo and TD learning comes down to the nested expectation operators. It turns out that there is a nice visual interpretation for what they are doing. We call it the <i>paths perspective</i> on value learning.
-    </p>
-
-    <h2>The Paths Perspective</h2>
-
-    <p>
-      We often think about an agent's experience as a series of trajectories. The grouping is logical and easy to visualize.
-    </p>
-
-  <figure id="cliffworld-trajectories" class="l-body">
-    <div class="subfigure">
-        <img src="figures/cliffworld-path-1of4.svg"/>
-        <div class="figcaption">
-            Trajectory 1
-        </div>
-    </div>
-    <div>
-      <img src="figures/cliffworld-path-2of4.svg"/>
-      <div class="figcaption">
-        Trajectory 2
-      </div>
-    </div>
-  </figure>
-
-
-    <p>
-      But this way of organizing experience de-emphasizes relationships <i>between</i> trajectories. Wherever two trajectories intersect, both outcomes are valid futures for the agent. So even if the agent has followed Trajectory 1 to the intersection, it could <i>in theory</i> follow Trajectory 2 from that point onward. We can dramatically expand the agent's experience using these simulated trajectories or "paths."
-    </p>
-    <style>
-  #cliffworld-paths {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-    grid-gap: 20px;
-  }
-  </style>
-  <figure id="cliffworld-paths" class="l-text">
-
-    <div class="subfigure">
-        <img src="figures/cliffworld-path-1of4.svg"/>
-        <div class="figcaption">
-        Path 1
-        </div>
-    </div>
-
-    <div class="subfigure">
-      <img src="figures/cliffworld-path-2of4.svg"/>
-      <div class="figcaption">
-        Path 2
-      </div>
-    </div>
-
-    <div class="subfigure">
-      <img src="figures/cliffworld-path-3of4.svg"/>
-      <div class="figcaption">
-        Path 3
-      </div>
-    </div>
-
-    <div class="subfigure">
-      <img src="figures/cliffworld-path-4of4.svg"/>
-      <div class="figcaption">
-        Path 4
-      </div>
-    </div>
-  </figure>
-
-    <p>
-      <b>Estimating value.</b> It turns out that Monte Carlo is averaging over real trajectories whereas TD learning is averaging over all possible paths. The nested expectation values we saw earlier correspond to the agent averaging across <i>all possible future paths</i>.
-    </p>
-
-  <style>
-  #compare-mctd {
-    display: grid;
-    grid-gap: 40px;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  }
-  #compare-mctd .subfigure {
-      display: grid;
-      grid-gap: 20px;
-      grid-template-columns: repeat(2, minmax(160px, 1fr));
-      /* grid-auto-rows: min-content; */
-      /* grid-template-rows: min-content auto; */
-    }
-  #compare-mctd .subfigure .column-heading {
-      grid-column: 1 / -1;
-  }
-
-  #compare-mctd .figcaption {
-    border-top: 1px solid rgba(0, 0, 0, 0.1);
-    padding-top: 5px;
-    margin-top: 5px;
-      /* min-height: 179px; */
-      /* min-width: 179px; */
-      /* flex: 1; */
-  }
-
-
-  </style>
-  <figure id="compare-mctd" class="l-page">
-      <div class="subfigure">
-        <h4 style="grid-column: span 2;" class="column-heading">Monte Carlo Estimation</h4>
-        <div style="grid-column: 1;" class="evidence">
-            <img src="figures/traj-thumbnails.svg"/>
-            <div class="figcaption">
-                Averages over <strong>real trajectories</strong>
-            </div>
-        </div>
-        <div style="grid-column: 2;" class="estimate">
-            <img src="figures/cliffworld-mc.svg"/>
-            <div class="figcaption">
-                Resulting MC estimate
-            </div>
-        </div>
-      </div>
-      <div class="subfigure">
-        <h4 style="grid-column: span 2;" class="column-heading">Temporal Difference Estimation</h4>
-        <div class="evidence">
-            <img src="figures/path-thumbnails.svg"/>
-            <div class="figcaption">
-                    Averages over <strong>possible paths</strong>
-            </div>
-        </div>
-        <div class="estimate">
-            <img src="figures/cliffworld-td.svg"/>
-            <div class="figcaption">
-                Resulting TD estimate
-            </div>
-        </div>
-      </div>
-  </figure>
-
-    <p>
-      <b>Comparing the two.</b> Generally speaking, the best value estimate is the one with the lowest variance. Since tabular TD and Monte Carlo are empirical averages, the method that gives the better estimate is the one that averages over more items. This raises a natural question: Which estimator averages over more items?
-    </p>
-
-    <div class="eq-grid" style="grid-gap: 8px;">
-
-      <div style="grid-row: 1; grid-column: 1;"><d-math>Var[V(s)]~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\propto~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>\frac{1}{N} </d-math></div>
-
-      <figcaption style="grid-row: 2; grid-column: 1; max-width:140px;"> Variance of estimate </figcaption>
-      <figcaption style="grid-row: 2; grid-column: 5; max-width:140px;">Inverse of the number of items in the average</figcaption>
-
-    </div>
-
-    <p>
-      First off, TD learning never averages over fewer trajectories than Monte Carlo because there are never fewer simulated trajectories than real trajectories. On the other hand, when there are <i>more</i> simulated trajectories, TD learning has the chance to average over more of the agent's experience.
-
-      This line of reasoning suggests that TD learning is the better estimator and helps explain why TD tends to outperform Monte Carlo in tabular environments.
-    </p>
-
-<!--     <p>
-      Here's a link to my latest <a href="https://www.overleaf.com/read/nppjvtjfmqjr">attempt at a proof</a>.
-    </p> -->
-
-
-    <h2>Introducing Q-functions</h2>
-
-    <p>
-      An alternative to the value function is the Q-function. Instead of estimating the value of a state, it estimates the value of a state and an action. The most obvious reason to use Q-functions is that they allow us to compare different actions.
-    </p>
-
-  <style>
-  #qlearning-intro {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-    grid-column-gap: 30px;
-  }
-  </style>
-  <figure id="qlearning-intro" style="max-width: 600px;">
-    <div>
-        <img src="figures/policy.svg"/>
-        <div class="figcaption">
-            Many times we’d like to compare the value of actions under a policy.
-        </div>
-    </div>
-
-    <div>
-        <img src="figures/value.svg"/>
-        <div class="figcaption">
-            It’s hard to do this with a value function.
-        </div>
-    </div>
-
-    <div>
-        <img src="figures/qvalue.svg"/>
-        <div class="figcaption">
-            It’s easier to use Q-functions, which estimate joint state-action values.
-        </div>
-    </div>
-  </figure>
-
-    <p>
-      There are some other nice properties of Q-functions. In order to see them, let's write out the Monte Carlo and TD update rules.
-
-      <!-- First, though, we need to modify our Monte Carlo and TD updates. -->
-    </p>
-
-    <p>
-      <b>Updating Q-functions.</b> The Monte Carlo update rule looks nearly identical to the one we wrote down for $V(s)$:
-    </p>
-
-    <div class="eq-grid" style="grid-gap: 8px; margin-top: 10; margin-bottom: 10;">
-      <div style="grid-row: 1; grid-column: 1;"><d-math>Q(s_t, a_t)~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\hookleftarrow~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>R_t</d-math></div>
-
-      <figcaption style="grid-row: 2; grid-column: 1; max-width:140px;"> State-action value </figcaption>
-      <figcaption style="grid-row: 2; grid-column: 5; max-width:200px;"> Return </figcaption>
-    </div>
-
-    <p>
-      We still update towards the return. Instead of updating towards the return of being in some state, though, we update towards the return of being in some state <i>and</i> selecting some action.
-    </p>
-
-    <p>
-      Now let's try doing the same thing with the TD update:
-    </p>
-
-    <div class="eq-grid" style="grid-gap: 8px; margin-top: 10; margin-bottom: 10;">
-
-      <div style="grid-row: 1; grid-column: 1;"><d-math>Q(s_t, a_t)~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\hookleftarrow~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>r_{t} </d-math></div>
-      <div style="grid-row: 1; grid-column: 7;"><d-math>+</d-math></div>
-      <div style="grid-row: 1; grid-column: 9;"><d-math>\gamma Q(s_{t+1}, a_{t+1})</d-math></div>
-
-      <figcaption style="grid-row: 2; grid-column: 1; max-width:140px;"> State-action value </figcaption>
-      <figcaption style="grid-row: 2; grid-column: 5; max-width:140px;">Reward</figcaption>
-      <figcaption style="grid-row: 2; grid-column: 9/12; max-width:300px;">Next state value</figcaption>
-      <!-- <figcaption style="grid-row: 2; grid-column: 9/12; max-width:300px;">Next state value (should be $V(s_{t+1})$)</figcaption> -->
-
-    </div>
-
-    <p>
-      This version of the TD update rule requires a tuple of the form $(s_t, a_t, r_{t}, s_{t+1}, a_{t+1})$, so we call it the <i>Sarsa</i> algorithm.
-      Sarsa may be the simplest way to write this TD update, but it's not the most efficient.
-      The problem with Sarsa is that it uses $Q(s_{t+1},a_{t+1})$ for the next state value when it really should be using $V(s_{t+1})$.
-<!--       The problem is that we're using $Q(s_{t+1},a_{t+1})$ to estimate the next state value. -->
-<!--       The problem with Sarsa is that it updates towards $Q(s_{t+1},a_{t+1})$ when in fact it should update towards $V(s_{t+1})$. -->
-      What we need is a better estimate of $V(s_{t+1})$.
-    </p>
-
-    <div class="eq-grid" style="grid-gap: 8px; margin-top: 10; margin-bottom: 10;">
-      <div style="grid-row: 1; grid-column: 1;"><d-math>Q(s_t, a_t)~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 3;"><d-math>\hookleftarrow~~</d-math></div>
-      <div style="grid-row: 1; grid-column: 5;"><d-math>r_{t} </d-math></div>
-      <div style="grid-row: 1; grid-column: 7;"><d-math>+</d-math></div>
-      <div style="grid-row: 1; grid-column: 9;"><d-math>\gamma V(s_{t+1})</d-math></div>
-
-      <figcaption style="grid-row: 2; grid-column: 1; max-width:140px;"> State-action value </figcaption>
-      <figcaption style="grid-row: 2; grid-column: 5; max-width:140px;">Reward</figcaption>
-      <figcaption style="grid-row: 2; grid-column: 9; max-width:140px;">Next state value</figcaption>
-
-      <div style="grid-row: 4; grid-column: 1;"><d-math>V(s_{t+1})~~</d-math></div>
-      <div style="grid-row: 4; grid-column: 3;"><d-math>=~~</d-math></div>
-      <div style="grid-row: 4; grid-column: 5;"><d-math>? </d-math></div>
-    </div>
-
-    <p>
-      There are many ways to recover $V(s_{t+1})$ from Q-functions. In the next section, we'll take a close look at four of them.
-    </p>
-
-
-    <h2>Learning Q-functions with reweighted paths</h2>
-
-    <p>
-      <b>Expected Sarsa.</b>
-      A better way of estimating the next state's value is with a weighted sum<d-footnote>Also written as an expectation value, hence "Expected Sarsa".</d-footnote> over its Q-values. We call this approach Expected Sarsa:
-    </p>
-
-    <figure id="expected-sarsa" class="l-body two-column-math">
-        <div class="wrapper">
-            <div class="figcaption">
-                <b>Sarsa</b> uses the Q-value associated with $a_{t+1}$ to estimate the next state's value.
-            </div>
-            <img src="figures/sarsa.svg" />
-            <div class="figcaption">
-                <b>Expected Sarsa</b> uses an expectation over Q-values to estimate the next state's value.
-            </div>
-            <img src="figures/expected-sarsa.svg" />
-        </div>
-    </figure>
-
-    <p>
-      Here's a surprising fact about Expected Sarsa: the value estimate it gives is often <i>better</i> than a value estimate computed straight from the experience. This is because the expectation value weights the Q-values by the true policy distribution rather than the empirical policy distribution. In doing this, Expected Sarsa <i>corrects for the difference between the empirical policy distribution and the true policy distribution.</i>
-    </p>
-
-    <p>
-      <b>Off-policy value learning.</b> We can push this idea even further. Instead of weighting Q-values by the true policy distribution, we can weight them by an arbitrary policy, $\pi^{off}$:
-    </p>
-    <figure id="off-policy" class="l-body two-column-math">
-        <div class="wrapper">
-            <div class="figcaption">
-                <b>Off-policy value learning</b> weights Q-values by an arbitrary policy.
-            </div>
-            <img src="figures/off-policy.svg" />
-        </div>
-    </figure>
-
-    <p>
-      This slight modification lets us estimate value under any policy we like. It's interesting to think about Expected Sarsa as a special case of off-policy learning that's used for on-policy estimation.
-    </p>
-
-    <p>
-      <b>Re-weighting path intersections.</b> What does the paths perspective say about off-policy learning? To answer this question, let's consider some state where multiple paths of experience intersect.
-    </p>
-
-    <style>
-        #reweighting {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            grid-gap: 30px;
-        }
-        /* #reweighting .wrapper {
-            min-width: 160px;
-        } */
-        #reweighting-full .cls-1 {
-            fill: #2d307b;
-        }
-
-        #reweighting-full .cls-2 {
-            fill: #e7ebe8;
-        }
-
-        #reweighting-full .cls-3 {
-            fill: #cac9cc;
-        }
-
-        #reweighting-full .cls-4 {
-            fill: #bd5f35;
-        }
-
-        #reweighting-full .cls-5, .cls-6, .cls-7 {
-            fill: none;
-            stroke-width: 10px;
-        }
-
-        #reweighting-full .cls-5 {
-            stroke: #bd5f35;
-        }
-
-        #reweighting-full .cls-5, .cls-7 {
-            stroke-miterlimit: 10;
-        }
-
-        #reweighting-full .cls-6 {
-            stroke: #2d307b;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-
-        #reweighting-full .cls-7 {
-            stroke: #8191c9;
-        }
-
-        #reweighting-full .cls-8 {
-            fill: #8191c9;
-        }
-
-        #reweighting-full .cls-9 {
-            font-size: 24.25341px;
-            fill: #d1d3d4;
-            font-family: Arial-BoldMT, Arial;
-            font-weight: 700;
-        }
-    </style>
-  <figure id="reweighting" class="l-text">
-
-    <div class="wrapper">
-        <img src="figures/reweighting-1.svg"/>
-        <div class="figcaption">
-            Multiple paths of experience intersect at this state.
-        </div>
-    </div>
-
-    <div class="wrapper">
-        <img src="figures/reweighting-2.svg"/>
-        <div class="figcaption">
-            Paths that exit the state through different actions get associated with different Q-values.
-        </div>
-    </div>
-
-    <div class="wrapper">
-        <svg width="100%" id="reweighting-full" viewBox="0 0 294 294">
-            <g id="background">
-            <rect class="cls-1" x="182.00345" y="4.47957" width="47.96635" height="47.96635"/>
-            <rect class="cls-2" x="0.05169" y="0.34616" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="59.4495" y="0.40632" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="118.61002" y="0.41807" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="0.05169" y="59.75541" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="59.4495" y="59.81557" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="118.61002" y="59.82731" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="177.9302" y="59.85081" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="0.05169" y="118.9093" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="59.4495" y="118.96946" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="118.61002" y="118.98121" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="177.9302" y="119.0047" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="0.05169" y="178.31855" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="59.4495" y="178.37871" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="118.61002" y="178.39046" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="177.9302" y="178.41395" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="0.05169" y="237.67423" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="59.4495" y="237.73439" width="56.11284" height="56.11284"/>
-            <rect class="cls-2" x="118.61003" y="237.74613" width="56.11285" height="56.11281"/>
-            <rect class="cls-2" x="177.9302" y="237.76963" width="56.11284" height="56.11284"/>
-            <circle class="cls-3" cx="28.10811" cy="28.40258" r="17.77298"/>
-            <circle class="cls-3" cx="87.50592" cy="28.48625" r="17.77298"/>
-            <circle class="cls-3" cx="205.93014" cy="147.62242" r="17.77298"/>
-            <circle class="cls-3" cx="27.75183" cy="206.58113" r="17.77298"/>
-            <circle class="cls-3" cx="87.14964" cy="206.37497" r="17.77298"/>
-            <circle class="cls-3" cx="205.93014" cy="206.52757" r="17.77298"/>
-            <circle class="cls-3" cx="27.75183" cy="266.39172" r="17.77298"/>
-            <circle class="cls-3" cx="87.14964" cy="267.64814" r="17.77298"/>
-            <circle class="cls-3" cx="205.93014" cy="266.33815" r="17.77298"/>
-            <rect class="cls-4" x="238.60313" y="2.47146" width="55.147" height="290.43915"/>
-            <circle class="cls-3" cx="27.68222" cy="87.35202" r="17.77298"/>
-            </g>
-            <g id="right-path">
-            <line class="cls-5" x1="147.26" y1="87.94907" x2="244.851" y2="87.94907"/>
-            </g>
-            <g id="up-path">
-            <polyline class="cls-6" points="147.26 87.949 147.26 26.856 186.377 26.856"/>
-            </g>
-            <g id="downstream">
-            <polyline class="cls-7" points="147.111 268.043 147.111 133.574 147.111 84.699"/>
-            <path class="cls-7" d="M27.75183,148.02255H69.62388a17.69918,17.69918,0,0,0,17.70937-17.70937l-.04514-24.72539a17.69919,17.69919,0,0,1,17.70937-17.70937l24.48954.07065h17.59692"/>
-            <circle class="cls-8" cx="27.75183" cy="147.67598" r="17.77298"/>
-            <circle class="cls-8" cx="87.14964" cy="147.75966" r="17.77298"/>
-            <circle class="cls-8" cx="147.26" cy="147.75966" r="17.77298"/>
-            <circle class="cls-8" cx="147.26" cy="206.6648" r="17.77298"/>
-            <circle class="cls-8" cx="147.26001" cy="266.47539" r="17.77299"/>
-            <circle class="cls-8" cx="147.26" cy="87.94907" r="17.77298"/>
-            <circle class="cls-8" cx="87.14964" cy="87.94907" r="17.77298"/>
-            </g>
-            <g id="foreground">
-            <circle class="cls-4" cx="205.93014" cy="87.81183" r="17.77298"/>
-            <circle class="cls-1" cx="147.61628" cy="28.48625" r="17.77298"/>
-            <text class="cls-9" transform="translate(188.17039 33.69667)">+2</text>
-            <text class="cls-9" transform="translate(248.31443 96.99745)">-1</text>
-            </g>
-        </svg>
-        <div class="figcaption">
-            <div>Weight of upward path: <span id="q-value-label"></span></div>
-            <d-slider id="q-value-slider" min="0" max="1" step="0.01" ticks="10" style="width: 95%;"></d-slider>
-            Whenever we re-weight Q-values, we also re-weight the paths that pass through them.
-        </div>
-    </div>
-</figure>
-<script src="vis/reweighting.js"></script>
-
-
-    <p>
-      Wherever intersecting paths are re-weighted, the paths that are most representative of the off-policy distribution end up making larger contributions to the value estimate. Meanwhile, paths that have low probability make smaller contributions.
-    </p>
-
-    <p>
-      <b>Q-learning.</b> There are many cases where an agent needs to collect experience under a sub-optimal policy (e.g. to improve exploration) while estimating value under an optimal one. In these cases, we use a version of off-policy learning called Q-learning.
-    </p>
-
-    <style>
-      
-    </style>
-    <figure id="q-learning" class="l-body two-column-math">
-        <div class="wrapper">
-            <div class="figcaption">
-                <b>Q-learning</b> estimates value under the optimal policy by choosing the max Q-value.
-            </div>
-            <img class="diagram" src="figures/q-learning.svg" />
-        </div>
-    </figure>
-
-   <p>
-     Q-learning prunes away all but the highest-valued paths. The paths that remain are the paths that the agent will follow at test time; they are the only ones it needs to pay attention to. This sort of value learning often leads to faster convergence than on-policy methods<d-footnote>Try using the Playground at the end of this article to compare between approaches.</d-footnote>.
-   </p>
-
-    <p>
-      <b>Double Q-Learning.</b> The problem with Q-learning is that it gives biased value estimates. More specifically, it is over-optimistic in the presence of noisy rewards. Here's an example where Q-learning fails:
-    </p>
-
-    <p>
-      <i>You go to a casino and play a hundred slot machines. It's your lucky day: you hit the jackpot on machine 43. Now, if you use Q-learning to estimate the value of being in the casino, you will choose the best outcome over the actions of playing slot machines. You'll end up thinking that the value of the casino is the value of the jackpot...and decide that the casino is a great place to be!</i>
-    </p>
-
-    <p>
-      Sometimes the largest Q-value of a state is large <i>just by chance</i>; choosing it over others makes the value estimate biased.
-      One way to reduce this bias is to have a friend visit the casino and play the same set of slot machines. Then, ask them what their winnings were at machine 43 and use their response as your value estimate. It's not likely that you both won the jackpot on the same machine, so this time you won't end up with an over-optimistic estimate. We call this approach <i>Double Q-learning</i>.<d-cite key="VanHasselt2010DoubleQ-learning"></d-cite>
-    </p>
-
-    <p>
-      <b>Putting it together. </b> It's easy to think of Sarsa, Expected Sarsa, Q-learning, and Double Q-learning as different algorithms. But as we've seen, they are simply different ways of estimating $V(s_{t+1})$ in a TD update.
-    </p>
-
-    <figure id="overview" class="l-page two-column-math">
-        <div class="wrapper">
-            <h4>On-policy methods</h4>
-            <div></div>
-            <div class="figcaption" id="overview-caption">
-                <b>Sarsa</b> uses the Q-value associated with $a_{t+1}$ to estimate the next state's value.
-            </div>
-            <img src="figures/sarsa.svg" />
-            <div class="figcaption">
-                <b>Expected Sarsa</b> uses an expectation over Q-values to estimate the next state's value.
-            </div>
-            <img src="figures/expected-sarsa.svg" />
-
-            <h4>Off-policy methods</h4>
-            <div></div>
-
-            <div class="figcaption">
-                <b>Off-policy value learning</b> weights Q-values by an arbitrary policy.
-            </div>
-            <img src="figures/off-policy.svg" />
-            <div class="figcaption">
-                <b>Q-learning</b> estimates value under the optimal policy by choosing the max Q-value.
-            </div>
-            <img src="figures/q-learning.svg" />
-            <div class="figcaption">
-                <b>Double Q-learning</b> selects the best action with $Q_A$ and then estimates the value of that action with
-                $Q_B$.
-            </div>
-            <img src="figures/double-q-learning.svg" />
-        </div>
-    </figure>
-
-    <p>
-      The intuition behind all of these approaches is that they re-weight path intersections.
-    </p>
-
-    <p>
-      <b>Re-weighting paths with Monte Carlo.</b> At this point, a natural question is: Could we accomplish the same re-weighting effect with Monte Carlo? We could, but it would be messier and involve re-weighting all of the agent's experience. By working at intersections, TD learning re-weights individual transitions instead of episodes as a whole. This makes TD methods much more convenient for off-policy learning.
-    </p>
-
-
-    <h2>Merging Paths with Function Approximators</h2>
-
-    <p>
-      Up until now, we've learned one parameter -- the value estimate -- for every state or every state-action pair. This works well for the Cliff World example because it has a small number of states. But most interesting RL problems have a large or infinite number of states. This makes it hard to store value estimates for each state.
-      <!-- ut as the number of states becomes large or infinite -- as is the case in many interesting RL problems -- it becomes impossible to store a value estimate for each state. -->
-    </p>
-
-    <style>
-        #figure-fnapprox-intro {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            grid-column-gap: 20px;
-            grid-row-gap: 10px;
-            /* grid-auto-flow: column; */
-        }
-    </style>
-    <figure id="figure-fnapprox-intro" class="l-page">
-        <div class="wrapper">
-            <img src="figures/large-cliffworld-states.svg" />
-            <div class="figcaption">
-                <b>Large or infinite state spaces</b> are a characteristic of many interesting RL problems. Value estimation
-                in these spaces often requires function approximation.
-            </div>
-        </div>
-
-        <div class="wrapper">
-            <img src="figures/large-cliffworld-path.svg" />
-            <div class="figcaption">
-                <b>Tabular value functions</b> keep value estimates for each individual state. They consume a great deal of
-                memory and don't generalize.
-            </div>
-        </div>
-
-        <div class="wrapper">
-            <img src="figures/large-cliffworld-approx.svg" />
-            <div class="figcaption">
-                <b>Euclidean averagers</b> – which are a type of function approximator – save memory and let agents
-                generalize to states they haven't visited yet.
-            </div>
-        </div>
-    </figure>
-
-    <p>
-      Instead, we must force our value estimator to have fewer parameters than there are states. We can do this with machine learning methods such as linear regression, decision trees, or neural networks. All of these methods fall under the umbrella of function approximation.
-    </p>
-
-<!--     <p>
-      An interesting property of function approximation is that updating one parameter will tend to change more than one value estimate. Let's see how this changes things by returning to the Cliff World example. This time, we'll give the environment many more states.
-    </p> -->
-
-    <p>
-      <b>Merging nearby paths.</b> From the paths perspective, we can interpret function approximation as a way of merging nearby paths. But what do we mean by "nearby"? In the figure above, we made an implicit decision to measure "nearby" with Euclidean distance. This was a good idea because the Euclidean distance between two states is highly correlated with the probability that the agent will transition between them.
-    </p>
-
-    <p>
-      However, it's easy to imagine cases where this implicit assumption breaks down. By adding a single long barrier, we can construct a case where the Euclidean distance metric leads to bad generalization. The problem is that we have merged the wrong paths.
-    </p>
-
-    <style>
-        #fnapprox-barrier .wrapper {
-            margin-left: auto;
-            margin-right: auto;
-            display: grid;
-            grid-template-columns: 1fr 1.464fr;
-            grid-template-rows: auto auto;
-            grid-column-gap: 20px;
-            grid-row-gap: 10px;
-            grid-auto-flow: column;
-        }
-    </style>
-    <figure id="fnapprox-barrier" class="l-page">
-        <div class="wrapper">
-            <img src="figures/large-cliffworld-barrier-intro.svg" />
-            <div class="figcaption">
-                Imagine changing the Cliff World setup by adding a long barrier.
-            </div>
-
-            <img src="figures/large-cliffworld-barrier.svg" />
-            <div class="figcaption">
-                Now, using the Euclidean averager leads to bad value updates.
-            </div>
-        </div>
-    </figure>
-
-    <p>
-      <b>Merging the wrong paths.</b> The diagram below shows the effects of merging the wrong paths a bit more explicitly. Since the Euclidean averager is to blame for poor generalization, both Monte Carlo and TD make bad value updates. However, TD learning amplifies these errors dramatically whereas Monte Carlo does not.
-    </p>
-    <figure id="fnapprox-compare" class="l-page">
-      <img src="figures/compare-function-approx.svg" />
-    </figure>
-
-    <p>
-      We've seen that TD learning makes more efficient value updates. The price we pay is that these updates end up being much more sensitive to bad generalization.
-    </p>
-
-
-
-    <h2>Implications for deep reinforcement learning</h2>
-
-    <p>
-      <b>Neural networks.</b> Deep neural networks are perhaps the most popular function approximators for reinforcement learning. These models are exciting for many reasons, but one particularly nice property is that they don't make implicit assumptions about which states are "nearby."
-    </p>
-
-    <p>
-      Early in training, neural networks, like averagers, tend to merge the wrong paths of experience. In the Cliff Walking example, an untrained neural network might make the same bad value updates as the Euclidean averager.
-    </p>
-
-    <p>
-      But as training progresses, neural networks can actually learn to overcome these errors. They learn which states are "nearby" from experience. In the Cliff World example, we might expect a fully-trained neural network to have learned that value updates to states <i>above</i> the barrier should never affect the values of states <i>below</i> the barrier. This isn't something that most other function approximators can do. It's one of the reasons deep RL is so interesting!
-    </p>
-
-  <figure id="nn-latent-distance" class="l-text">
-      <img src="figures/latent-distance.png"/>
-      <figcaption>
-        A distance metric learned by a neural network <d-cite key="Srinivas2018UniversalNetworks"></d-cite>. <b>Lighter blue $\rightarrow$ more distant</b>. The agent, which was trained to grasp objects using the robotic arm, takes into account obstacles and arm length when it measures the distance between two states.
-      </figcaption>
-  </figure>
-
-    <p>
-      <b>TD or not TD?</b> So far, we've seen how TD learning can outperform Monte Carlo by merging paths of experience where they intersect. We've also seen that merging paths is a double-edged sword: when function approximation causes bad value updates, TD can end up doing worse.
-    </p>
-
-    <p>
-
-      Over the last few decades, most work in RL has preferred TD learning to Monte Carlo. Indeed, many approaches to RL use TD-style value updates. With that being said, there are many other ways to use Monte Carlo for reinforcement learning. Our discussion centers around Monte Carlo for value estimation in this article, but it can also be used for policy selection as in Silver et al.<d-cite key="silver2017mastering"></d-cite>
-<!--       There's an informal consensus that TD works better than Monte Carlo for deep RL. Indeed, TD methods have dominated the RL literature for the past several decades. There are still some notable exceptions: one recent paper shows that Monte Carlo can outperform TD methods in certain environments<d-cite key="Amiranashvili2018TDLearning"></d-cite>. -->
-    </p>
-
-    <p>
-      Since Monte Carlo and TD learning both have desirable properties, why not try building a value estimator that is a mixture of the two? That's the reasoning behind TD($\lambda$) learning. It's a technique that simply interpolates (using the coefficient $\lambda$) between Monte Carlo and TD updates<d-footnote>In the limit $\lambda=0$, we recover the TD update rule. Meanwhile, when $\lambda=1$, we recover Monte Carlo.</d-footnote>. Often, TD($\lambda$) works better than either Monte Carlo or TD learning alone<d-footnote>Researchers often keep the $\lambda$ coefficient constant as they train a deep RL model. However, if we think Monte Carlo learning is best early in training (before the agent has learned a good state representation) and TD learning is best later on (when it's easier to benefit from merging paths), maybe the best approach is to anneal $\lambda$ over the course of training.</d-footnote>.
-    </p>
-
-
-    <h2>Conclusion</h2>
-
-    <p>
-      In this article we introduced a new way to think about TD learning. It helps us see why TD learning can be beneficial, why it can be effective for off-policy learning, and why there can be challenges in combining TD learning with function approximators.
-    </p>
-
-    <p>
-      We encourage you to use the playground below to build on these intuitions, or to try an experiment of your own.
-    </p>
-
-    <h4>Gridworld playground</h4>
-
-    <div id="playground"></div>
-    <script src="vis/Playground.js" charset="utf-8"></script>
-
 </d-article>
 
 
